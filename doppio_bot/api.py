@@ -62,7 +62,7 @@ def is_erpnext_related(prompt_message: str) -> bool:
 @frappe.whitelist()
 def get_chatbot_response(session_id: str, prompt_message: str) -> str:
     # Obtener API Key desde site_config
-    os.environ['OPENAI_API_KEY'] = 'REDACTEDproj-mCiFz3Q7XcxCqImS0ewPzJ1gsT80fevAFCgd3MU3RMiPF9zMRU1AINivwlaQ_mmbaktxJdMez2T3BlbkFJB-g8hiMJqD33hFfrcOyEFBXFmhtfeaXsTZnQdxRAy1GVGeYogwH1mGNOiS-XYa5Ul72LQ5Bp0A'
+    
     openai_api_key = frappe.conf.get("openai_api_key") or frappe.get_site_config().get("openai_api_key")
     os.environ["OPENAI_API_KEY"] = openai_api_key  
 
