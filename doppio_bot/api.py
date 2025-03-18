@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 import calendar
 import os
 
-os.environ['OPENAI_API_KEY'] = 'REDACTEDproj-mCiFz3Q7XcxCqImS0ewPzJ1gsT80fevAFCgd3MU3RMiPF9zMRU1AINivwlaQ_mmbaktxJdMez2T3BlbkFJB-g8hiMJqD33hFfrcOyEFBXFmhtfeaXsTZnQdxRAy1GVGeYogwH1mGNOiS-XYa5Ul72LQ5Bp0A'
+
 
 
 # Asegurar resultados consistentes en la detección de idioma
