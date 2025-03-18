@@ -4,14 +4,21 @@ from langchain.memory import RedisChatMessageHistory, ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 from langchain.agents import tool, AgentType, initialize_agent
 from datetime import date
+from pydantic import BaseModel, model_validator
 from langchain.schema import SystemMessage
 from langdetect import detect, DetectorFactory
 from frappe import log_error 
 from typing import Optional, Dict
 from googletrans import Translator
 from frappe import get_all, db, utils
+from datetime import datetime, timedelta
+import frappe
+import logging
+from datetime import datetime, timedelta
 import calendar
+import os
 
+os.environ['OPENAI_API_KEY'] = 'REDACTEDproj-mCiFz3Q7XcxCqImS0ewPzJ1gsT80fevAFCgd3MU3RMiPF9zMRU1AINivwlaQ_mmbaktxJdMez2T3BlbkFJB-g8hiMJqD33hFfrcOyEFBXFmhtfeaXsTZnQdxRAy1GVGeYogwH1mGNOiS-XYa5Ul72LQ5Bp0A'
 
 
 # Asegurar resultados consistentes en la detección de idioma
@@ -42,7 +49,7 @@ def is_erpnext_related(prompt_message: str) -> bool:
         "erpnext", "cliente", "factura", "venta", "compra", "inventario", 
         "proveedor", "artículo", "pedido", "cotización", "transacción","hola",
         "rotacion","inventario","ultima","informacion","costo","precio","ultimo","alto","ayuda",
-        "erp","sistema","datos maestros","producto","item"
+        "erp","sistema","datos maestros","producto","item","nit","cui"
         
     ]
     
@@ -55,7 +62,10 @@ def is_erpnext_related(prompt_message: str) -> bool:
 @frappe.whitelist()
 def get_chatbot_response(session_id: str, prompt_message: str) -> str:
     # Obtener API Key desde site_config
-    openai_api_key = frappe.conf.get("openai_api_key")
+    os.environ['OPENAI_API_KEY'] = 'REDACTEDproj-mCiFz3Q7XcxCqImS0ewPzJ1gsT80fevAFCgd3MU3RMiPF9zMRU1AINivwlaQ_mmbaktxJdMez2T3BlbkFJB-g8hiMJqD33hFfrcOyEFBXFmhtfeaXsTZnQdxRAy1GVGeYogwH1mGNOiS-XYa5Ul72LQ5Bp0A'
+    openai_api_key = frappe.conf.get("openai_api_key") or frappe.get_site_config().get("openai_api_key")
+    os.environ["OPENAI_API_KEY"] = openai_api_key  
+
     openai_model = get_model_from_settings()
 
 
@@ -65,7 +75,7 @@ def get_chatbot_response(session_id: str, prompt_message: str) -> str:
     if not is_erpnext_related(prompt_message):
         return "Lo siento, solo puedo responder preguntas relacionadas con ERPNext. ¿En qué más puedo ayudarte?"
     # Configuración del modelo LLM
-    llm = OpenAI(model_name=openai_model, temperature=0, openai_api_key=openai_api_key)
+    llm = OpenAI(model_name=openai_model, temperature=0)
 
     # Historial de conversación en Redis
     redis_url = frappe.conf.get("redis_cache", "redis://localhost:6379/0")
@@ -75,9 +85,9 @@ def get_chatbot_response(session_id: str, prompt_message: str) -> str:
     memory = ConversationBufferMemory(memory_key="chat_history", chat_memory=message_history)
 
     # Definir herramientas
-    tools = [update_customers, create_customer, delete_customers, get_info_customer, get_customer_stats,
-             create_sales_invoice, get_sales_stats, create_item, create_purchase_invoice, create_suppliers,
-             get_item_stats]
+    tools = [update_customers, create_customer, delete_customers, get_info_customer,
+             create_sales_invoice,create_sales_order, get_sales_stats, create_purchase_invoice, create_suppliers,
+             get_item_stats,get_sales_stats,create_item,consultar_identificacion_sat]
 
     # Mensaje de sistema para forzar el idioma
     system_message = SystemMessage(content="Eres un asistente virtual que responde exclusivamente en español. No importa el idioma en el que te hablen, siempre debes responder en español.")
@@ -89,6 +99,7 @@ def get_chatbot_response(session_id: str, prompt_message: str) -> str:
         agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
         verbose=True,
         memory=memory,
+        handle_parsing_errors = True,
         system_message=system_message  # Agregar el mensaje de sistema
     )
 
@@ -127,11 +138,37 @@ def ensure_spanish(response: str) -> str:
         print(f"Error en la detección de idioma: {e}")  # Depuración
         # En caso de error en la detección, devolver un mensaje en español
         return "Lo siento, hubo un error al procesar tu solicitud."
-    
+
 @tool
-def create_sales_invoice(invoice_data: str) -> str:
+def consultar_identificacion_sat(identificacion: str) -> str:
     """
-    Create a new Sales Invoice in Frappe ERPNext.
+    Consulta el nombre de un cliente en el SAT de Guatemala utilizando su NIT o CUI.
+
+    Args:
+        identificacion (str): NIT o CUI del cliente a consultar.
+
+    Returns:
+        str: Nombre del cliente si se encuentra, o un mensaje de error.
+    """
+    try:
+        # Determinar automáticamente si es NIT o CUI basado en la longitud
+        if len(identificacion) == 9:
+            # Si es NIT, llamar a la función consultar_sat_nit
+            nombre_cliente = frappe.get_attr("fel.certificacion.consultar_sat_nit")(identificacion)
+        elif len(identificacion) == 13:
+            # Si es CUI, llamar a la función llamar_servicio_web
+            nombre_cliente = frappe.get_attr("fel.certificacion.llamar_servicio_web")(identificacion)
+        else:
+            return "failed: La identificación proporcionada no es válida. Debe ser un NIT (9 dígitos) o un CUI (13 dígitos)."
+
+        return nombre_cliente
+    except Exception as e:
+        return f"Error al consultar la identificación en el SAT: {str(e)}"
+
+@tool
+def create_sales_order(order_data: str) -> str:
+    """
+    Create a new Sales Order in Frappe ERPNext.
 
     Expected input: JSON string with the following fields:
     - `customer`: The name of the customer (mandatory).
@@ -139,15 +176,14 @@ def create_sales_invoice(invoice_data: str) -> str:
         - `item_code`: The item code (mandatory).
         - `qty`: Quantity (mandatory).
         - `rate`: Price per unit (mandatory).
-    - `due_date`: (optional) Invoice due date in "YYYY-MM-DD" format.
+    - `delivery_date`: (optional) Delivery date in "YYYY-MM-DD" format.
     - `taxes`: (optional) A list of taxes to apply.
-    - `fel_status`: (optional) Text indicating if the invoice is "CON FEL" or "SIN FEL".
     - `additional_notes`: (optional) Additional text that may contain "EXENTO" or "EXENTA".
 
     Returns "done" if successful, otherwise "failed".
     """
     try:
-        data = frappe.parse_json(invoice_data)
+        data = frappe.parse_json(order_data)
 
         # Validar campos obligatorios
         if not data.get("customer"):
@@ -174,15 +210,8 @@ def create_sales_invoice(invoice_data: str) -> str:
 
         # Establecer valores predeterminados
         data.setdefault("posting_date", fecha_actual)
-        data.setdefault("due_date", fecha_ultimo_dia)
+        data.setdefault("delivery_date", fecha_ultimo_dia)
         data.setdefault("taxes_and_charges", plantilla) 
-        data.setdefault("update_stock", 1)
-
-        # Determinar el valor de custom_fel según el texto ingresado
-        fel_status = data.get("fel_status", "").strip().upper()
-        custom_fel = 0  # Valor predeterminado (0 para "SIN FEL")
-        if fel_status == "CON FEL":
-            custom_fel = 1  # 1 para "CON FEL"
 
         # Validar items
         items = []
@@ -211,15 +240,172 @@ def create_sales_invoice(invoice_data: str) -> str:
             taxes = frappe.get_doc("Sales Taxes and Charges Template", data["taxes_and_charges"]).taxes
 
         # Crear documento de factura
-        invoice = frappe.get_doc({
-            "doctype": "Sales Invoice",
+        order = frappe.get_doc({
+            "doctype": "Sales Order",
             "customer": data["customer"],
             "items": items,
-            "due_date": data.get("due_date"),
+            "cost_center": data["cost_center"] or data.get("cost_center"),
+            "delivery_date": data.get("delivery_date"),
             "taxes_and_charges": data.get("taxes_and_charges"),
             "taxes": taxes,
-            "custom_fel": custom_fel  # Asignar el valor calculado
         })
+
+        order.insert()
+        frappe.db.commit()
+        return "done"
+
+    except Exception as e:
+        frappe.log_error(f"Error creating Sales Order: {str(e)}")
+        return f"failed: {str(e)}"  # Devolver el mensaje de error
+
+@tool
+def create_sales_invoice(invoice_data: str) -> str:
+    """
+    Create a new Sales Invoice in Frappe ERPNext.
+
+    Expected input: JSON string with the following fields:
+    - `customer`: The name of the customer (mandatory).
+    - `center_cost`: The name of the cost center.
+    - `items`: A list of items, each with:
+        - `item_code`: The item code (mandatory).
+        - `qty`: Quantity (mandatory).
+        - `rate`: Price per unit (mandatory).
+    - `due_date`: (optional) Invoice due date in "YYYY-MM-DD" format.
+    - `taxes`: (optional) A list of taxes to apply.
+    - `fel_status`: (optional) Text indicating if the invoice is "CON FEL" or "SIN FEL".
+    - `additional_notes`: (optional) Additional text that may contain "EXENTO" or "EXENTA".
+    - `id_identificacion`: (optional) Identification type, must be "NIT" or "CUI".
+    - `id_receptor_`: (optional) Receiver identification number, must be numeric.
+
+    Returns "done" if successful, otherwise "failed".
+    """
+    try:
+        # Verificar si el input es un JSON válido
+        if not invoice_data or not invoice_data.strip():
+            return "failed: Empty or invalid JSON input."
+
+        # Depuración: Imprimir el input recibido
+        print(f"Input received: {invoice_data}")
+
+        # Parsear el JSON
+        try:
+            data = json.loads(invoice_data.strip())  # Usar strip() para eliminar espacios innecesarios
+        except json.JSONDecodeError as e:
+            return f"failed: Invalid JSON format. Error: {str(e)}"
+
+        # Depuración: Imprimir el JSON parseado
+        print(f"Parsed data: {data}")
+
+        # Validar campos obligatorios
+        if not data.get("customer"):
+            return "failed: Missing required field 'customer'."
+        if not data.get("items"):
+            return "failed: Missing required field 'items'."
+
+        # Validar items
+        for item in data["items"]:
+            if not item.get("item_code") or not item.get("qty") or not item.get("rate"):
+                return "failed: Missing required fields in 'items' (item_code, qty, or rate)."
+
+        # Validar campos adicionales si la empresa requiere FEL
+        if data.get("id_identificacion") and data["id_identificacion"].upper() not in ["NIT", "CUI"]:
+            return "failed: 'id_identificacion' must be 'NIT' or 'CUI'."
+        if data.get("id_receptor_") and not str(data["id_receptor_"]).isdigit():
+            return "failed: 'id_receptor_' must be a numeric value."
+
+        # Obtener la empresa predeterminada del usuario
+        customer_company = frappe.defaults.get_user_default("Company")
+
+        # Obtener la configuración de la empresa
+        company_config = frappe.get_doc("Company Configuration", {"company": customer_company})
+        print(f"Company config: {company_config}")
+
+        # Validar campos adicionales si la empresa requiere FEL
+        if company_config.default_fel_configuration:
+            if not data.get("id_identificacion"):
+                return "failed: Missing required field 'id_identificacion'."
+            if not data.get("id_receptor_"):
+                return "failed: Missing required field 'id_receptor_'."
+
+        # Obtener la fecha actual
+        fecha_actual = date.today()
+
+        # Calcular el último día del mes actual
+        ultimo_dia_del_mes = calendar.monthrange(fecha_actual.year, fecha_actual.month)[1]
+        fecha_ultimo_dia = date(fecha_actual.year, fecha_actual.month, ultimo_dia_del_mes)
+
+        # Verificar si la factura es EXENTA
+        additional_notes = data.get("additional_notes", "").strip().upper()
+        is_exento = "EXENTO" in additional_notes or "EXENTA" in additional_notes
+
+        # Obtener la plantilla de impuestos predeterminada solo si no es EXENTO/EXENTA
+        plantilla = ""
+        if not is_exento:
+            plantilla = frappe.get_value("Sales Taxes and Charges Template", {'is_default': 1}, "name") or ""
+        print(f"Plantilla de impuestos: {plantilla}")
+
+        # Establecer valores predeterminados
+        data.setdefault("posting_date", fecha_actual)
+        data.setdefault("due_date", fecha_ultimo_dia)
+        data.setdefault("taxes_and_charges", plantilla)
+        data.setdefault("update_stock", 1)
+
+        # Determinar el valor de custom_fel según el texto ingresado
+        fel_status = data.get("fel_status", "").strip().upper()
+        custom_fel = 0  # Valor predeterminado (0 para "SIN FEL")
+        if fel_status == "CON FEL":
+            custom_fel = 1  # 1 para "CON FEL"
+
+        # Crear documento de factura
+        invoice_data = {
+            "doctype": "Sales Invoice",
+            "customer": data["customer"],
+            "cost_center": data.get("center_cost", ""),  # Corregido: usar get para evitar KeyError
+            "items": [],
+            "due_date": data.get("due_date"),
+            "taxes_and_charges": data.get("taxes_and_charges"),
+            "custom_fel": custom_fel  # Asignar el valor calculado
+        }
+
+        # Agregar campos adicionales si la empresa requiere FEL
+        if company_config.default_fel_configuration:
+            invoice_data.update({
+                "vendedor": data.get("vendedor", frappe.session.user),  # Usuario conectado
+                "id_identificacion": data.get("id_identificacion"),
+                "id_receptor_": data.get("id_receptor_")
+            })
+
+        # Procesar cada item
+        for item in data["items"]:
+            item_code = item["item_code"]
+            qty = item["qty"]
+            rate = item["rate"]
+
+            # Verificar si el producto requiere serie
+            item_doc = frappe.get_doc("Item", item_code)
+            if item_doc.has_serial_no:
+                # Buscar la serie más antigua disponible
+                serial_nos = frappe.get_all("Serial No", filters={
+                    "item_code": item_code,
+                    "status": "Active"
+                }, fields=["name", "creation"], order_by="creation", limit=qty)
+
+                if len(serial_nos) < qty:
+                    return f"failed: Not enough serial numbers available for item {item_code}."
+
+                # Asignar las series más antiguas
+                item["serial_no"] = "\n".join([sno["name"] for sno in serial_nos])
+            else:
+                item["serial_no"] = ""
+
+            invoice_data["items"].append(item)
+
+        # Crear la factura
+        invoice = frappe.get_doc(invoice_data)
+
+        # Verificar y asignar términos de pago si es necesario
+        if not invoice.get("payment_terms"):
+            invoice.set("payment_terms", [])
 
         invoice.insert()
         frappe.db.commit()
@@ -227,26 +413,7 @@ def create_sales_invoice(invoice_data: str) -> str:
 
     except Exception as e:
         frappe.log_error(f"Error creating Sales Invoice: {str(e)}")
-        return f"failed: {str(e)}"  # Devolver el mensaje de error
-@tool
-def create_todo(todo: str) -> str:
-    """
-    Crea un nuevo ToDo en Frappe.
-    Debe recibir un JSON con al menos la clave `description`. Opcionalmente puede incluir `date` en formato "YYYY-MM-DD".
-    Devuelve "done" si se crea correctamente o "failed" en caso de error.
-    """
-    try:
-        data = frappe.parse_json(todo)
-        new_todo = frappe.get_doc({"doctype": "ToDo", **data})
-        new_todo.insert()
-        return "done"
-    except frappe.ValidationError as e:
-        frappe.log_error(f"Validation Error: {str(e)}", "create_todo")
-        return "failed"
-    except Exception as e:
-        frappe.log_error(f"Unexpected Error: {str(e)}", "create_todo")
-        return "failed"
-
+        return f"failed: {str(e)}"
 @tool
 def create_customer(cliente: str) -> str:
     """
@@ -260,7 +427,7 @@ def create_customer(cliente: str) -> str:
 
         # Establecer valores por defecto si no se proporcionan
         data.setdefault("customer_group", "Individual")  
-        data.setdefault("territory", "All Territories")
+        data.setdefault("territory", "Todos los Territorios")
         data.setdefault("default_currency", "GTQ")  
 
         # Crear el cliente
@@ -458,157 +625,80 @@ def get_info_customer(cliente: str) -> str:
         return f"Error inesperado: {str(e)}"
 
 
-
-@tool
-def get_customer_stats(filtro: str = "", tipo: str = "total") -> str:
-    """
-    Obtiene estadísticas de clientes en Frappe.
-    
-    Parámetros:
-    - `tipo`: Define el tipo de consulta:
-        - `"total"`: Devuelve la cantidad total de clientes.
-        - `"coincidencia"`: Busca clientes cuyo nombre contenga el texto de `filtro`.
-        - `"deudores"`: Lista los clientes con saldo pendiente de pago.
-
-    - `filtro`: (Opcional) Solo se usa si `tipo` es "coincidencia". 
-      Busca clientes cuyo nombre contenga este texto.
-
-    Retorna:
-    - Un mensaje con la información solicitada.
-    """
-    try:
-        # Opción 1: Contar clientes totales
-        if tipo == "total":
-            total_clientes = frappe.db.count("Customer")
-            return f"Actualmente hay {total_clientes} clientes en el sistema."
-
-        # Opción 2: Buscar clientes con coincidencia en el nombre
-        elif tipo == "coincidencia":
-            if not filtro:
-                return "Error: Debes proporcionar un nombre o parte de un nombre en 'filtro'."
-            
-            clientes = frappe.get_all(
-                "Customer",
-                filters=[["customer_name", "like", f"%{filtro}%"]],
-                fields=["name", "customer_name"]
-            )
-
-            if not clientes:
-                return f"No se encontraron clientes con '{filtro}' en su nombre."
-
-            respuesta = "Clientes encontrados:\n" + "\n".join([f"- {c['customer_name']}" for c in clientes])
-            return respuesta
-
-        # Opción 3: Clientes con saldo pendiente (deudores)
-        elif tipo == "deudores":
-            deudores = frappe.get_all(
-                "Customer",
-                filters=[["outstanding_amount", ">", 0]],
-                fields=["name", "customer_name", "outstanding_amount"]
-            )
-
-            if not deudores:
-                return "No hay clientes con saldo pendiente."
-
-            respuesta = "Clientes con saldo pendiente:\n" + "\n".join(
-                [f"- {c['customer_name']}: Q{c['outstanding_amount']}" for c in deudores]
-            )
-            return respuesta
-
-        else:
-            return "Error: Tipo de consulta inválido. Usa 'total', 'coincidencia' o 'deudores'."
-
-    except Exception as e:
-        frappe.log_error(f"Unexpected Error: {str(e)}", "get_customer_stats")
-        return f"Error inesperado: {str(e)}"
-
-from frappe import get_all, db, utils
+from frappe import db
 import logging
-
-# Configuración básica de logging
-logging.basicConfig(level=logging.DEBUG)
+import json
+from datetime import datetime  # Importar datetime para manejar fechas
 
 @tool
-def get_sales_stats(customer: str = None) -> dict:
+def get_sales_stats(customer: str) -> str:
     """
-    Get sales statistics from Frappe ERPNext.
-
-    Parameters:
-    - `customer` (optional): The name of the customer to filter the results.
+    Get sales statistics from Frappe ERPNext for the last year.
 
     Returns a dictionary with the following keys:
-    - `last_sale`: Details of the last sale.
-    - `highest_sale`: Details of the highest sale.
-    - `overdue_invoices`: List of overdue invoices.
-    - `top_products`: List of top-selling products.
-    - `customer_balance`: Outstanding balance of the customer (if customer is provided).
+    - last_sale: Details of the last sale.
+    - highest_sale: Details of the highest sale.
+    - overdue_invoices: Summary of overdue invoices.
+    - top_products: List of top-selling products.
     """
     try:
         stats = {}
 
         # 1. Última venta
         ultima_venta = db.sql("""
-            SELECT name,grand_total,customer,creation
-            FROM `tabSales Invoice`
-            WHERE creation = (SELECT MAX(creation) FROM `tabSales Invoice`) and docstatus = 1;
-
+           SELECT * FROM last_sale;
         """, as_dict=True)
-        logging.debug(f"Ultima venta registrada:: {ultima_venta}")
-        stats["last_sale"] = ultima_venta if ultima_venta else {"error": "No se encontraron ventas"}
 
+        stats["last_sale"] = ultima_venta[0] if ultima_venta else {"error": "No se encontraron ventas"}
 
-        # 2. Factura más alta de venta
+        # 2. Factura más alta (solo 1 registro)
         venta_alta = db.sql("""
-            SELECT name,grand_total,customer
-            FROM `tabSales Invoice`
-            WHERE grand_total = (SELECT MAX(grand_total) FROM `tabSales Invoice`) and docstatus = 1;
-
+            SELECT * FROM highest_sale;
         """, as_dict=True)
-        logging.debug(f"Venta mas alta registrada:: {venta_alta}")
-        stats["highest_sale"] = venta_alta if venta_alta else {"error": "No se encontraron ventas"}
 
-        # 3. Facturas atrasadas de pago
+        stats["highest_sale"] = venta_alta[0] if venta_alta else {"error": "No se encontraron ventas en el último año"}
+
+        # 3. Facturas atrasadas (limitar a 5 registros)
         facturas_atrasadas = db.sql("""
-        SELECT name,due_date,grand_total,customer
-            FROM `tabSales Invoice`
-            WHERE  docstatus = 1 and CURRENT_DATE >= due_date and status != "Paid";
-
+           SELECT * FROM overdue_invoices;
         """, as_dict=True)
-        logging.debug(f"Venta mas alta registrada:: {facturas_atrasadas}")
-        stats["overdue_invoices"] = facturas_atrasadas if facturas_atrasadas else {"error": "No se encontraron ventas"}
-        
-        # 4. Top productos más vendidos
+
+        stats["overdue_invoices"] = facturas_atrasadas if facturas_atrasadas else {"error": "No se encontraron facturas atrasadas en el último año"}
+
+        # 4. Top productos más vendidos (limitar a 3 registros)
         top_products = db.sql("""
-            SELECT item_code, SUM(qty) as total_qty,item_name
-            FROM `tabSales Invoice Item`
-            WHERE parent IN (SELECT name FROM `tabSales Invoice` WHERE docstatus = 1)
-            GROUP BY item_code
-            ORDER BY total_qty DESC
-            LIMIT 5
+                SELECT * FROM top_products;
         """, as_dict=True)
-        logging.debug(f"Top productos: {top_products}")
-        stats["top_products"] = top_products if top_products else {"error": "No se encontraron productos más vendidos"}
 
-  
+        stats["top_products"] = top_products if top_products else {"error": "No se encontraron productos más vendidos en el último año"}
+
+        # Convertir el diccionario a un texto formateado
+
+
         return stats
 
     except Exception as e:
         logging.error(f"Error en get_sales_stats: {str(e)}")
-        return {"error": str(e)}
+        return f"Error: {str(e)}"
 
 @tool
-def create_item(item: str, name: str = None) -> str:
+def create_item(params: dict) -> str:
     """
     Crea un nuevo ítem en Frappe.
     
     Parámetros:
-    - item: Puede ser un JSON con al menos la clave `description`. Opcionalmente puede incluir `date` en formato "YYYY-MM-DD".
-            También puede ser un texto plano que describa el ítem.
-    - name: Nombre del producto (opcional). Si no se proporciona, se usará la descripción como nombre.
+    - `params`: Un diccionario que contiene:
+        - `item`: Puede ser un JSON con al menos la clave `description`. Opcionalmente puede incluir `date` en formato "YYYY-MM-DD".
+                  También puede ser un texto plano que describa el ítem.
+        - `name`: Nombre del producto (opcional). Si no se proporciona, se usará la descripción como nombre.
     
     Devuelve "done" si se crea correctamente o "failed" en caso de error.
     """
     try:
+        # Extraer valores del diccionario `params`
+        item = params.get("item")
+        name = params.get("name")
+
         # Intentar parsear el ítem como JSON
         try:
             data = frappe.parse_json(item)
@@ -638,10 +728,6 @@ def create_item(item: str, name: str = None) -> str:
     except Exception as e:
         frappe.log_error(f"Unexpected Error: {str(e)}", "create_item")
         return "failed"
-
-
-
-
 
 
 @tool
@@ -834,11 +920,7 @@ def get_item_stats(item: Optional[str] = None) -> Dict:
 
         # 1. Última compra
         ultima_compra = db.sql("""
-            SELECT b.item_code, b.item_name, b.creation, a.supplier, b.amount, b.qty 
-            FROM `tabPurchase Invoice` a 
-            INNER JOIN `tabPurchase Invoice Item` b ON b.parent = a.name 
-            WHERE a.docstatus = 1 
-            AND b.creation = (SELECT MAX(creation) FROM `tabPurchase Invoice Item`)
+             SELECT * FROM last_sale;
         """, as_dict=True)
         logging.debug(f"Última compra registrada: {ultima_compra}")
         stats["last_purchase"] = ultima_compra if ultima_compra else {"error": "No se encontraron compras"}
@@ -854,8 +936,7 @@ def get_item_stats(item: Optional[str] = None) -> Dict:
                 `tabItem Price` ip
             WHERE 
                 ip.item_code = %s
-                AND ip.price_list = 'Standard Selling'
-            LIMIT 1
+     
         """, (item,), as_dict=True)
         logging.debug(f"Precio del producto: {costo_producto}")
         stats["item_price"] = costo_producto if costo_producto else {"error": "No se encontraron precios del producto"}
@@ -905,6 +986,22 @@ def get_item_stats(item: Optional[str] = None) -> Dict:
         """, (item,), as_dict=True)
         logging.debug(f"Cliente que más ha comprado el producto: {cliente}")
         stats["customer_purchases"] = cliente if cliente else {"error": "No se encontraron productos más vendidos"}
+
+        stock = db.sql("""
+          SELECT 
+            bin.warehouse AS almacen,
+            bin.actual_qty AS cantidad_actual,
+            bin.reserved_qty AS cantidad_reservada,
+            bin.ordered_qty AS cantidad_pedida,
+            bin.projected_qty AS cantidad_proyectada
+        FROM 
+            `tabBin` AS bin
+        WHERE 
+        bin.item_code = %s;
+
+        """, (item,), as_dict=True)
+        logging.debug(f"Stock del producto: {stock}")
+        stats["stock"] = stock if stock else {"error": "No se encontraron datos relacionados al producto"}
 
         return stats
 
